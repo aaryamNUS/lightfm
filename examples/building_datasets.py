@@ -2,11 +2,16 @@ import csv
 import json
 import os
 import requests
+import time
 import zipfile
+import numpy as np
 
 from itertools import islice
 from lightfm import LightFM
+from lightfm.cross_validation import random_train_test_split
 from lightfm.data import Dataset
+from lightfm.evaluation import auc_score
+from lightfm.evaluation import precision_at_k
 
 # download the Goodbooks-10k example dataset
 def _download(url: str, dest_path: str):
@@ -45,15 +50,25 @@ def get_ratings():
 def get_book_features():
 	return get_data()[1]
 
+np.set_printoptions(threshold=np.nan)
+
+# set the number of threads; can increase this
+# if more physical cores are available. However, MacOS systems 
+# use a default value of 1 thread if OpenMP is not supported
+NUM_THREADS = 2
+NUM_COMPONENTS = 30
+NUM_EPOCHS = 3
+ITEM_ALPHA = 1e-6
+
 ratings, book_features = get_data()
 
 # print out the ratings
-for line in islice(ratings, 2):
-	print(json.dumps(line, indent=4))
+#for line in islice(ratings, 2):
+	#print(json.dumps(line, indent=4))
 
 # print out the book features
-for line in islice(book_features, 1):
-	print(json.dumps(line, indent=4))
+#for line in islice(book_features, 1):
+	#print(json.dumps(line, indent=4))
 
 # create a dataset and build the ID mappings
 dataset = Dataset()
@@ -75,42 +90,34 @@ dataset.fit_partial(items=(x['ISBN'] for x in get_book_features()),
 (interactions, weights) = dataset.build_interactions(((x['User-ID'], x['ISBN'])
 													   for x in get_ratings()))
 
-print(repr(interactions))
-
 # item_features matrix can also be created
 item_features = dataset.build_item_features(((x['ISBN'], [x['Book-Author']])
 											  for x in get_book_features()))
 
-print(repr(item_features))
+# split the current dataset into a training and test dataset
+train, test = random_train_test_split(interactions, test_percentage=0.001, random_state=None)
 
-# build the model using the custom dataset
-model = LightFM(loss='bpr')
-model.fit(interactions, item_features=item_features)
+# build the model using the training dataset, notice the use of item_features as well, 
+# this is a hybrid model
+model = LightFM(loss='warp',item_alpha=ITEM_ALPHA,no_components=NUM_COMPONENTS)
 
-"""
-# compare the accuracy of BPR model with the custom dataset
-epochs = 70
-num_components = 32
+# train the hybrid model on the training dataset
+model.fit(train,item_features=item_features,epochs=NUM_EPOCHS,num_threads=1)
+print('Model with WARP loss function fit successfully')
 
-bpr_duration = []
-bpr_auc = []
+# evaluate the hybrid model on the test set
+test_auc = auc_score(model, test, item_features=item_features,num_threads=1).mean()
+print('Hybrid test set AUC (WARP): %s' % test_auc)
 
-# times for the BPR model
-for epoch in range(epochs):
-	start = time.time()
-	model.fit_partial(train, epochs=1)
-	bpr_duration.append(time.time() - start)
-	bpr_auc.append(auc_score(model, test, train_interactions=train).mean())
 
-# plot the results 
-x = np.arange(epochs)
-plt.plot(x, np.array(bpr_auc))
-plt.legend(['BPR AUC'], loc='upper right')
-plt.show()
 
-# plot the fitting accuracy
-x = np.arange(epochs)
-plt.plot(x, np.array(bpr_duration))
-plt.legend(['BPR duration'], loc='upper right')
-plt.show()
-"""
+# build an optimised model using WARP-kOS loss function
+model = LightFM(loss='warp-kos', item_alpha=ITEM_ALPHA,no_components=NUM_COMPONENTS)
+
+# train the hybrid model on the training dataset
+model.fit(train,item_features=item_features,epochs=NUM_EPOCHS,num_threads=1)
+print('Model with warp-kOS loss function fit successfully')
+
+#evaluate the hybrid model on the test set
+test_auc = auc_score(model, test, item_features=item_features,num_threads=1).mean()
+print('Hybrid test set AUC (WARP-kOS): %s' % test_auc)
